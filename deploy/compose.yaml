@@ -1,0 +1,163 @@
+name: campus-next
+services:
+  temporal-db:
+    image: postgres:18.3-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD_FILE: /run/secrets/temporal_password
+    secrets: [temporal_password]
+    volumes: ["temporal-data:/var/lib/postgresql"]
+    healthcheck:
+      test: [CMD, pg_isready, -U, temporal]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 768m
+    networks: [backplane]
+    logging: &logging
+      driver: local
+      options: {max-size: "10m", max-file: "3"}
+  temporal:
+    image: temporalio/auto-setup:1.29.7
+    restart: unless-stopped
+    depends_on:
+      temporal-db: {condition: service_healthy}
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_SEEDS: temporal-db
+      DEFAULT_NAMESPACE: campus-next
+      BIND_ON_IP: 0.0.0.0
+    secrets: [temporal_password]
+    entrypoint: ["/bin/sh", "-c", "export POSTGRES_PWD=$$(cat /run/secrets/temporal_password); exec /etc/temporal/entrypoint.sh autosetup"]
+    ports: ["127.0.0.1:7333:7233"]
+    mem_limit: 1500m
+    networks: [backplane, management]
+    logging: *logging
+  opa:
+    image: openpolicyagent/opa:1.20.2-static
+    restart: unless-stopped
+    command: [run, --server, --addr=0.0.0.0:8181, --log-level=error, /policy]
+    volumes: ["../policies:/policy:ro"]
+    ports: ["127.0.0.1:8281:8181"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    networks: [management]
+    logging: *logging
+  netbox-db:
+    image: postgres:18.3-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: netbox
+      POSTGRES_DB: netbox
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - source: netbox_database_password
+        target: db_password
+    volumes: ["netbox-data:/var/lib/postgresql"]
+    healthcheck:
+      test: [CMD, pg_isready, -U, netbox]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 768m
+    networks: [backplane]
+    logging: *logging
+  netbox-cache:
+    image: valkey/valkey:9.1-alpine
+    restart: unless-stopped
+    # Secrets remain in a private config file, not command arguments or environment.
+    command: [valkey-server, /run/secrets/valkey_config]
+    secrets: [valkey_config]
+    user: "${CAMPUS_NEXT_UID:-1000}:0"
+    volumes: ["netbox-cache:/data"]
+    mem_limit: 256m
+    networks: [backplane]
+    logging: *logging
+  netbox: &netbox
+    image: netboxcommunity/netbox:v4.7-5.1.1
+    restart: unless-stopped
+    user: "${CAMPUS_NEXT_UID:-1000}:0"
+    depends_on:
+      netbox-db: {condition: service_healthy}
+      netbox-cache: {condition: service_started}
+    environment:
+      DB_HOST: netbox-db
+      DB_NAME: netbox
+      DB_USER: netbox
+      REDIS_HOST: netbox-cache
+      REDIS_CACHE_HOST: netbox-cache
+      REDIS_DATABASE: 0
+      REDIS_CACHE_DATABASE: 1
+      ALLOWED_HOSTS: localhost 127.0.0.1 netbox
+      SKIP_SUPERUSER: "true"
+      CENSUS_REPORTING_ENABLED: "false"
+      ISOLATED_DEPLOYMENT: "true"
+      COPILOT_ENABLED: "false"
+      GRAPHQL_ENABLED: "false"
+      WEBHOOKS_ENABLED: "false"
+    secrets:
+      - source: netbox_database_password
+        target: db_password
+      - source: netbox_cache_password
+        target: redis_password
+      - source: netbox_cache_password
+        target: redis_cache_password
+      - source: netbox_secret_key
+        target: secret_key
+      - source: netbox_api_pepper
+        target: api_token_pepper_1
+      - source: netbox_token
+        target: campus_token
+    volumes:
+      - netbox-media:/opt/netbox/netbox/media
+      - ./netbox_bootstrap.py:/opt/campus/bootstrap.py:ro
+    ports: ["127.0.0.1:8876:8080"]
+    healthcheck:
+      test: [CMD, /opt/netbox/health.sh]
+      start_period: 120s
+      interval: 15s
+      timeout: 3s
+      retries: 10
+    mem_limit: 2g
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    networks: [backplane, management]
+    logging: *logging
+  netbox-worker:
+    <<: *netbox
+    command: [/opt/netbox/venv/bin/python, /opt/netbox/netbox/manage.py, rqworker]
+    depends_on:
+      netbox: {condition: service_healthy}
+    ports: []
+    healthcheck:
+      disable: true
+    mem_limit: 1g
+secrets:
+  temporal_password:
+    file: ../.state/secrets/temporal_password
+  netbox_database_password:
+    file: ../.state/secrets/netbox_database_password
+  netbox_cache_password:
+    file: ../.state/secrets/netbox_cache_password
+  netbox_secret_key:
+    file: ../.state/secrets/netbox_secret_key
+  netbox_api_pepper:
+    file: ../.state/secrets/netbox_api_pepper
+  netbox_token:
+    file: ../.state/secrets/netbox_token
+  valkey_config:
+    file: ../.state/secrets/valkey_config
+volumes:
+  temporal-data:
+  netbox-data:
+  netbox-cache:
+  netbox-media:
+networks:
+  backplane:
+    internal: true
+  management:

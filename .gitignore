@@ -1,0 +1,28 @@
+# Local configuration and installation state
+.state/
+.secrets/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.sql
+*.dump
+*.sqlite*
+*.db
+*.log
+# Dependencies and generated output
+.venv/
+node_modules/
+dist/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+test-results/
+playwright-report/
+.DS_Store
